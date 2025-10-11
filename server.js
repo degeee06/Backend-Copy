@@ -85,12 +85,24 @@ const logger = {
 app.use(cors());
 app.use(express.json());
 
-// ✅ MELHORADO: Rota para gerar conteúdo com validações
+// ✅ MELHORADO: Rota para gerar conteúdo com prompts otimizados
 app.post('/api/generate', rateLimit, validateGenerateRequest, async (req, res) => {
     try {
-        const { prompt, template } = req.body;
+        const { prompt, template, context = {} } = req.body;
 
-        logger.info('Gerando conteúdo', { template, promptLength: prompt.length });
+        logger.info('Gerando conteúdo melhorado', { 
+            template, 
+            promptLength: prompt.length,
+            context: Object.keys(context) 
+        });
+
+        // ✅ SISTEMA DE PROMPTS OTIMIZADOS POR TEMPLATE
+        const enhancedPrompt = buildEnhancedPrompt(prompt, template, context);
+        
+        const systemMessage = {
+            role: "system",
+            content: getSystemMessage(template)
+        };
 
         const response = await fetch('https://api.deepseek.com/chat/completions', {
             method: 'POST',
@@ -100,32 +112,35 @@ app.post('/api/generate', rateLimit, validateGenerateRequest, async (req, res) =
             },
             body: JSON.stringify({
                 model: "deepseek-chat",
-                messages: [
-                    {
-                        role: "system",
-                        content: "Você é um especialista em copywriting e marketing digital. Gere conteúdo persuasivo e otimizado em português do Brasil."
-                    },
-                    {
-                        role: "user",
-                        content: prompt
-                    }
-                ],
-                max_tokens: 1000,
-                temperature: 0.7
+                messages: [systemMessage, { role: "user", content: enhancedPrompt }],
+                max_tokens: 1500,
+                temperature: getTemperature(template), // ✅ Temperatura dinâmica
+                top_p: 0.9,
+                frequency_penalty: 0.2, // ✅ Reduz repetição
+                presence_penalty: 0.1,
+                stream: false
             })
         });
 
         if (!response.ok) {
-            logger.error('Erro na API DeepSeek', { status: response.status });
-            throw new Error(`API Error: ${response.status}`);
+            const errorText = await response.text();
+            logger.error('Erro na API DeepSeek', { 
+                status: response.status,
+                error: errorText 
+            });
+            throw new Error(`API Error: ${response.status} - ${errorText}`);
         }
 
         const data = await response.json();
-        const generatedContent = data.choices[0].message.content;
+        let generatedContent = data.choices[0].message.content;
+
+        // ✅ PÓS-PROCESSAMENTO para melhor qualidade
+        generatedContent = postProcessContent(generatedContent, template);
 
         logger.info('Conteúdo gerado com sucesso', { 
             contentLength: generatedContent.length,
-            template 
+            template,
+            tokens: data.usage?.total_tokens 
         });
 
         // Salvar no Supabase
@@ -136,7 +151,9 @@ app.post('/api/generate', rateLimit, validateGenerateRequest, async (req, res) =
                     {
                         template_type: template,
                         prompt: prompt,
+                        enhanced_prompt: enhancedPrompt, // ✅ Salvar prompt melhorado
                         content: generatedContent,
+                        tokens_used: data.usage?.total_tokens,
                         created_at: new Date().toISOString()
                     }
                 ]);
@@ -150,7 +167,11 @@ app.post('/api/generate', rateLimit, validateGenerateRequest, async (req, res) =
             logger.error('Database error:', dbError);
         }
 
-        res.json({ content: generatedContent });
+        res.json({ 
+            content: generatedContent,
+            tokens: data.usage?.total_tokens,
+            template: template
+        });
         
     } catch (error) {
         logger.error('Erro ao gerar conteúdo', error);
@@ -158,59 +179,186 @@ app.post('/api/generate', rateLimit, validateGenerateRequest, async (req, res) =
     }
 });
 
-// ✅ NOVO: Adicione no seu server.js (após as rotas existentes)
-app.post('/api/generate-enhanced', rateLimit, validateGenerateRequest, async (req, res) => {
-    try {
-        const { prompt, template, context } = req.body;
+// ✅ FUNÇÕES AUXILIARES PARA MELHOR QUALIDADE
 
-        logger.info('Gerando conteúdo melhorado', { 
-            template, 
-            promptLength: prompt.length,
-            context: context 
-        });
+function getSystemMessage(template) {
+    const messages = {
+        instagram: `Você é um expert em marketing para Instagram. Sua missão é criar legendas que:
+- Gerem MÁXIMO engajamento (likes, comentários, saves)
+- Usem storytelling autêntico
+- Incluam emojis estratégicos e 3-5 hashtags relevantes
+- Tenham chamadas para ação claras
+- Sejam em português do Brasil, natural e conversacional
+NUNCA use clichês como "Não perca essa oportunidade"`,
 
-        const systemMessage = {
-            role: "system",
-            content: `Você é um copywriter profissional especializado em ${template}. 
-Siga estas regras rigorosamente:
-1. Sempre responda em português do Brasil
-2. Formate a resposta EXATAMENTE como solicitado
-3. Seja específico, evite conteúdo genérico
-4. Use tom persuasivo mas natural
-5. Inclua elementos de copywriting comprovados`
-        };
+        facebook: `Você é um copywriter especialista em Facebook Ads. Sua missão:
+- Criar anúncios que CONVERTEM (cliques e vendas)
+- Usar fórmulas comprovadas: PAS, AIDA, Problema-Solução
+- Incluir urgência e escassez quando apropriado
+- CTAs claras e diretas
+- Texto persuasivo mas não agressivo
+Formato EXATO: Título + Texto + CTA`,
 
-        const response = await fetch('https://api.deepseek.com/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${process.env.DEEPSEEK_API_KEY}`
-            },
-            body: JSON.stringify({
-                model: "deepseek-chat",
-                messages: [systemMessage, { role: "user", content: prompt }],
-                max_tokens: 1500,
-                temperature: 0.8, // ✅ Um pouco mais criativo
-                top_p: 0.9,
-                frequency_penalty: 0.3, // ✅ Reduz repetição
-                presence_penalty: 0.2
-            })
-        });
+        ecommerce: `Você é um expert em copy para e-commerce. Foque em:
+- Benefícios (não só características)
+- Resolução de dores do cliente
+- Construção de confiança e autoridade
+- Diferenciais competitivos
+- Garantias e social proof
+Estrutura: Título atrativo → Descrição persuasiva → Features → CTA`,
 
-        if (!response.ok) {
-            throw new Error(`API Error: ${response.status}`);
+        email: `Você é um especialista em email marketing. Regras:
+- Assuntos com menos de 60 caracteres e curiosidade
+- Saudação personalizável
+- Conteúdo com valor real
+- CTAs claras e múltiplas
+- Tom adequado ao público
+- Fechamento profissional`,
+
+        blog: `Você é um expert em SEO e titulação. Crie títulos que:
+- Gerem curiosidade e cliques
+- Usem números, perguntas, "Como", "Por que"
+- Sejam específicos e com benefício claro
+- Otimizados para mecanismos de busca
+- Diferentes abordagens (lista, guia, pergunta, etc)`,
+
+        google: `Você é um especialista em Google Ads. Foque em:
+- Títulos dentro do limite de caracteres
+- Palavras-chave estratégicas
+- Diferenciais únicos
+- CTAs urgentes e diretas
+- Maximizar CTR (Taxa de Clique)`
+    };
+    
+    return messages[template] || "Você é um especialista em copywriting. Gere conteúdo persuasivo em português do Brasil.";
+}
+
+function buildEnhancedPrompt(userPrompt, template, context = {}) {
+    const basePrompts = {
+        instagram: `Crie 3 opções de legenda para Instagram sobre: "${userPrompt}"
+        
+CONTEXTO ADICIONAL:
+- Público: ${context.targetAudience || 'geral'}
+- Tom: ${context.tone || 'conversacional'} 
+- Objetivo: ${context.objective || 'engajamento'}
+
+DIRETRIZES:
+1. Primeira opção: storytelling emocional
+2. Segunda opção: educativo/informativo  
+3. Terceira opção: direta/persuasiva
+4. Incluir emojis estratégicos
+5. 3-5 hashtags relevantes no final
+6. Chamada para ação clara
+
+NÃO numere as opções, apenas apresente as 3 legendas.`,
+
+        facebook: `Crie um anúncio para Facebook Ads sobre: "${userPrompt}"
+
+CONTEXTO:
+- Público: ${context.targetAudience || 'Não especificado'}
+- Diferencial: ${context.keyFeatures || 'Não especificado'}
+- Objetivo: ${context.objective || 'vendas'}
+
+FORMATO EXATO:
+Título: [Título impactante - até 40 caracteres]
+Texto: [Texto persuasivo - até 150 caracteres]
+CTA: [Chamada para ação clara]`,
+
+        ecommerce: `Crie uma descrição de produto para e-commerce: "${userPrompt}"
+
+CONTEXTO:
+- Preço: ${context.productPrice || 'Não informado'}
+- Características: ${context.keyFeatures || 'Não especificadas'}
+- Público: ${context.targetAudience || 'geral'}
+
+ESTRUTURA:
+- Título atrativo
+- Descrição focada em BENEFÍCIOS
+- Lista de características principais
+- Elementos de confiança (garantia, reviews)
+- CTA para compra`,
+
+        email: `Crie um email de marketing sobre: "${userPrompt}"
+
+CONTEXTO:
+- Tipo: ${context.emailType || 'marketing'}
+- Público: ${context.targetAudience || 'clientes'}
+- Objetivo: ${context.objective || 'engajamento'}
+
+FORMATO:
+Assunto: [Assunto persuasivo - até 60 caracteres]
+Corpo: [Saudação + Conteúdo principal + CTA + Assinatura]`,
+
+        blog: `Gere 5 títulos atraentes para blog post: "${userPrompt}"
+
+CONTEXTO:
+- Abordagem: ${context.approach || 'variada'}
+- Foco SEO: ${context.seoFocus || 'sim'}
+- Público: ${context.targetAudience || 'geral'}
+
+DIVERSIDADE:
+1. Título com números
+2. Título com pergunta
+3. Título "Como fazer"
+4. Título com benefício claro
+5. Título urgente/curioso`,
+
+        google: `Crie um anúncio para Google Ads: "${userPrompt}"
+
+CONTEXTO:
+- Palavras-chave: ${context.keywords || 'Não especificadas'}
+- Diferencial: ${context.keyFeatures || 'Não especificado'}
+- Público: ${context.targetAudience || 'geral'}
+
+FORMATO EXATO:
+Título 1: [até 30 caracteres]
+Título 2: [até 30 caracteres]  
+Descrição: [até 90 caracteres]
+Path: [categoria/produto]`
+    };
+
+    return basePrompts[template] || userPrompt;
+}
+
+function getTemperature(template) {
+    // Temperaturas específicas por tipo de conteúdo
+    const temps = {
+        instagram: 0.8,    // Mais criativo
+        facebook: 0.7,     // Balanceado
+        ecommerce: 0.6,    // Mais consistente
+        email: 0.7,        // Balanceado
+        blog: 0.9,         // Muito criativo para títulos
+        google: 0.5        // Muito consistente (limites rigorosos)
+    };
+    return temps[template] || 0.7;
+}
+
+function postProcessContent(content, template) {
+    // Limpeza e formatação pós-geração
+    let processed = content
+        .replace(/\*\*(.*?)\*\*/g, '$1') // Remove **bold** markdown
+        .replace(/\n{3,}/g, '\n\n')      // Remove múltiplas quebras de linha
+        .trim();
+
+    // Validações específicas por template
+    if (template === 'google') {
+        // Garantir que atende limites do Google Ads
+        const lines = processed.split('\n');
+        if (lines.length >= 3) {
+            const title1 = lines[0].replace('Título 1:', '').trim();
+            const title2 = lines[1].replace('Título 2:', '').trim();
+            const description = lines[2].replace('Descrição:', '').trim();
+            
+            if (title1.length > 30) processed = `Título 1: ${title1.substring(0,30)}\n${lines.slice(1).join('\n')}`;
+            if (title2.length > 30) processed = `${lines[0]}\nTítulo 2: ${title2.substring(0,30)}\n${lines.slice(2).join('\n')}`;
+            if (description.length > 90) processed = `${lines[0]}\n${lines[1]}\nDescrição: ${description.substring(0,90)}`;
         }
-
-        const data = await response.json();
-        const generatedContent = data.choices[0].message.content;
-
-        // ... resto do código igual
-
-    } catch (error) {
-        logger.error('Erro ao gerar conteúdo melhorado', error);
-        res.status(500).json({ error: 'Erro ao gerar conteúdo' });
     }
-});
+
+    return processed;
+}
+
+
 
 // ✅ MELHORADO: Rota para buscar histórico com rate limiting
 app.get('/api/history', rateLimit, async (req, res) => {
@@ -548,4 +696,5 @@ app.listen(PORT, () => {
     logger.info(`Supabase URL: ${supabaseUrl ? 'Configured' : 'Not configured'}`);
     logger.info(`Rate limiting: Ativo (50 req/15min por IP)`);
 });
+
 
