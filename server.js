@@ -158,6 +158,60 @@ app.post('/api/generate', rateLimit, validateGenerateRequest, async (req, res) =
     }
 });
 
+// ✅ NOVO: Adicione no seu server.js (após as rotas existentes)
+app.post('/api/generate-enhanced', rateLimit, validateGenerateRequest, async (req, res) => {
+    try {
+        const { prompt, template, context } = req.body;
+
+        logger.info('Gerando conteúdo melhorado', { 
+            template, 
+            promptLength: prompt.length,
+            context: context 
+        });
+
+        const systemMessage = {
+            role: "system",
+            content: `Você é um copywriter profissional especializado em ${template}. 
+Siga estas regras rigorosamente:
+1. Sempre responda em português do Brasil
+2. Formate a resposta EXATAMENTE como solicitado
+3. Seja específico, evite conteúdo genérico
+4. Use tom persuasivo mas natural
+5. Inclua elementos de copywriting comprovados`
+        };
+
+        const response = await fetch('https://api.deepseek.com/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${process.env.DEEPSEEK_API_KEY}`
+            },
+            body: JSON.stringify({
+                model: "deepseek-chat",
+                messages: [systemMessage, { role: "user", content: prompt }],
+                max_tokens: 1500,
+                temperature: 0.8, // ✅ Um pouco mais criativo
+                top_p: 0.9,
+                frequency_penalty: 0.3, // ✅ Reduz repetição
+                presence_penalty: 0.2
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(`API Error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        const generatedContent = data.choices[0].message.content;
+
+        // ... resto do código igual
+
+    } catch (error) {
+        logger.error('Erro ao gerar conteúdo melhorado', error);
+        res.status(500).json({ error: 'Erro ao gerar conteúdo' });
+    }
+});
+
 // ✅ MELHORADO: Rota para buscar histórico com rate limiting
 app.get('/api/history', rateLimit, async (req, res) => {
     try {
@@ -494,3 +548,4 @@ app.listen(PORT, () => {
     logger.info(`Supabase URL: ${supabaseUrl ? 'Configured' : 'Not configured'}`);
     logger.info(`Rate limiting: Ativo (50 req/15min por IP)`);
 });
+
